@@ -1,32 +1,25 @@
 #!/usr/bin/env bash
-# Empirical FUSE/LazyFS capability probe for ubuntu-latest.
+# Empirical FUSE/LazyFS capability probe for ubuntu-latest. Every blocking
+# step is wrapped in `timeout` so a bad FIFO/umount exits rather than hangs.
 set -uo pipefail
+T() { timeout "$@"; }
 echo "=== 0. environment ==="
-uname -a; grep PRETTY /etc/os-release; id
-
-echo
-echo "=== 1. /dev/fuse ==="
-ls -l /dev/fuse
-echo
-echo "=== 2. fuse3 userspace ==="
-which fusermount fusermount3 mount.fuse
-echo
-echo "=== 3. install deps (sudo) ==="
+uname -r; grep PRETTY /etc/os-release; id -un
+echo "=== 1. /dev/fuse ==="; ls -l /dev/fuse
+echo "=== 2. fuse userspace ==="; which fusermount fusermount3
+echo "=== 3. deps ==="
 sudo apt-get update -qq >/dev/null 2>&1
 sudo apt-get install -y -qq fuse3 libfuse3-dev pkg-config cmake g++ >/dev/null 2>&1
 echo "apt rc=$?"
 grep -q user_allow_other /etc/fuse.conf || echo 'user_allow_other' | sudo tee -a /etc/fuse.conf >/dev/null
-echo "fuse.conf allow_other: $(grep user_allow_other /etc/fuse.conf)"
-
-echo
-echo "=== 4. build LazyFS release 0.3.1 ==="
-cd /tmp
+grep user_allow_other /etc/fuse.conf
+echo "=== 4. build LazyFS 0.3.1 ==="
+cd /tmp && rm -rf lazyfs
 git clone --depth 1 --branch 0.3.1 https://github.com/dsrhaslab/lazyfs.git 2>&1 | tail -1
-cd /tmp/lazyfs/libs/libpcache && ./build.sh >/tmp/pc.log 2>&1; echo "libpcache rc=$?"
-cd /tmp/lazyfs/lazyfs && ./build.sh >/tmp/lz.log 2>&1; echo "lazyfs rc=$?"; ls -l /tmp/lazyfs/lazyfs/build/lazyfs 2>&1
-
-echo
-echo "=== 5. correct config key is [filesystem] ==="
+( cd /tmp/lazyfs/libs/libpcache && ./build.sh >/tmp/pc.log 2>&1 ); echo "libpcache rc=$?"
+( cd /tmp/lazyfs/lazyfs && ./build.sh >/tmp/lz.log 2>&1 ); echo "lazyfs rc=$?"
+ls -l /tmp/lazyfs/lazyfs/build/lazyfs
+echo "=== 5. mount LazyFS (foreground, backgrounded) ==="
 cat > /tmp/lazyfs.toml <<'TEOF'
 [faults]
 fifo_path="/tmp/faults.fifo"
@@ -40,41 +33,43 @@ log_all_operations=false
 logfile="/tmp/lazyfs.log"
 TEOF
 mkdir -p /tmp/lzroot /tmp/lzmnt
-cd /tmp/lazyfs/lazyfs
-./scripts/mount-lazyfs.sh -c /tmp/lazyfs.toml -m /tmp/lzmnt -r /tmp/lzroot -s 2>&1 | tail -3
-sleep 2
-grep "/tmp/lzmnt" /proc/mounts && echo "MOUNTED" || echo "LazyFS NOT MOUNTED"
-
-echo
-echo "=== 6. fault injection: durable vs un-fsynced ==="
+rm -f /tmp/faults.fifo
+# run the binary directly in foreground mode, capture pid
+/tmp/lazyfs/lazyfs/build/lazyfs /tmp/lzmnt --config-path /tmp/lazyfs.toml \
+   -o allow_other -o modules=subdir -o subdir=/tmp/lzroot -s -f >/tmp/lazyfs.stdout 2>&1 &
+LZPID=$!
+echo "lazyfs pid=$LZPID"
+for i in $(seq 1 20); do grep -q "/tmp/lzmnt" /proc/mounts && break; sleep 0.5; done
+grep "/tmp/lzmnt" /proc/mounts && echo "MOUNTED" || { echo "NOT MOUNTED"; cat /tmp/lazyfs.stdout; }
+echo "fifo exists? $(ls -l /tmp/faults.fifo 2>&1)"
+echo "=== 6. durable(fsynced) vs un-fsynced write, then clear-cache ==="
 mkdir -p /tmp/lzmnt/tbl
 python3 - <<'PY'
-import os,fcntl
+import os
 d="/tmp/lzmnt/tbl"
-# durable: write then fsync the file AND the directory entry
 f=open(os.path.join(d,"durable.txt"),"wb"); f.write(b"DURABLE\n"); f.flush(); os.fsync(f.fileno()); f.close()
-dfd=os.open(d,os.O_DIRECTORY); os.fsync(dfd); os.close(dfd)
-# un-fsynced: write, no fsync at all
+fd=os.open(d,os.O_DIRECTORY); os.fsync(fd); os.close(fd)
 g=open(os.path.join(d,"lost.txt"),"wb"); g.write(b"UNFSYNCED\n"); g.flush(); g.close()
-print("wrote durable.txt (fsynced) and lost.txt (not fsynced)")
+print("wrote durable.txt (fsynced) + lost.txt (not fsynced)")
 PY
-echo "--- before crash, mountpoint:"; ls /tmp/lzmnt/tbl
-echo "--- trigger clear-cache (drops un-fsynced data):"
-echo "lazyfs::clear-cache" > /tmp/faults.fifo; echo "clear-cache rc=$?"
+echo "mountpoint before crash:"; ls /tmp/lzmnt/tbl
+# FIFO write can block if no reader: guard with timeout
+T 5 bash -c 'echo "lazyfs::clear-cache" > /tmp/faults.fifo'; echo "clear-cache rc=$?"
 sleep 1
-echo "--- after clear, BACKING STORE (/tmp/lzroot):"; find /tmp/lzroot -type f | sort
-echo "--- after clear, mount still shows (page cache):"; ls /tmp/lzmnt/tbl | sort
-
-echo
-echo "=== 7. unmount + remount clean (simulated power cycle) ==="
-./scripts/umount-lazyfs.sh -m /tmp/lzmnt/ 2>&1 | tail -1
-sleep 1
-./scripts/mount-lazyfs.sh -c /tmp/lazyfs.toml -m /tmp/lzmnt -r /tmp/lzroot -s 2>&1 | tail -1
-sleep 2
-echo "--- POST-REMOUNT mountpoint contents:"
-ls -la /tmp/lzmnt/tbl
-echo "--- durable.txt exists? "; test -f /tmp/lzmnt/tbl/durable.txt && echo YES && cat /tmp/lzmnt/tbl/durable.txt || echo NO
-echo "--- lost.txt exists?   "; test -f /tmp/lzmnt/tbl/lost.txt && echo "YES (fault did NOT drop it)" && cat /tmp/lzmnt/tbl/lost.txt || echo "NO (un-fsynced write correctly dropped)"
-./scripts/umount-lazyfs.sh -m /tmp/lzmnt/ 2>&1 | tail -1
-echo
+echo "BACKING STORE after clear:"; find /tmp/lzroot -type f | sort
+echo "mount still shows:"; ls /tmp/lzmnt/tbl | sort
+echo "=== 7. unmount + remount clean (power cycle) ==="
+T 10 fusermount3 -u /tmp/lzmnt; echo "umount rc=$?"
+kill $LZPID 2>/dev/null; wait $LZPID 2>/dev/null
+rm -f /tmp/faults.fifo
+echo "lzmnt entry after umount: $(grep -c '/tmp/lzmnt' /proc/mounts)"
+/tmp/lazyfs/lazyfs/build/lazyfs /tmp/lzmnt --config-path /tmp/lazyfs.toml \
+   -o allow_other -o modules=subdir -o subdir=/tmp/lzroot -s -f >/tmp/lazyfs2.stdout 2>&1 &
+LZPID2=$!
+for i in $(seq 1 20); do grep -q "/tmp/lzmnt" /proc/mounts && break; sleep 0.5; done
+grep -q "/tmp/lzmnt" /proc/mounts && echo "REMOUNTED" || echo "REMOUNT FAILED"
+echo "POST-REMOUNT contents:"; ls -la /tmp/lzmnt/tbl 2>&1
+echo "durable.txt: $(test -f /tmp/lzmnt/tbl/durable.txt && cat /tmp/lzmnt/tbl/durable.txt || echo ABSENT)"
+echo "lost.txt:    $(test -f /tmp/lzmnt/tbl/lost.txt && cat /tmp/lzmnt/tbl/lost.txt || echo 'ABSENT (un-fsynced write dropped by fault injection)')"
+T 10 fusermount3 -u /tmp/lzmnt 2>&1; kill $LZPID2 2>/dev/null
 echo "=== PROBE DONE ==="
