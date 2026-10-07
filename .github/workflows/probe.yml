@@ -17,3 +17,5 @@ jobs:
         run: bash probe2.sh
       - name: LazyFS rename-vs-unlink separability probe
         run: bash probe3.sh
+      - name: dm-flakey directory-entry fault injector probe
+        run: bash probe4.sh
