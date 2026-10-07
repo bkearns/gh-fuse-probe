@@ -8,8 +8,10 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: FUSE + LazyFS capability probe
         run: bash probe.sh
+      - name: LazyFS metadata-semantics probe
+        run: bash probe2.sh
