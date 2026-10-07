@@ -44,8 +44,8 @@ PY
   # unmount (kill FS to force clean remount of backing store)
   fusermount3 -u /tmp/lzmnt 2>/dev/null; kill $P 2>/dev/null; wait $P 2>/dev/null
   rm -f /tmp/faults.fifo; sync; sleep 0.5
-  echo "  [$name] surviving names:"
-  ls -la /tmp/lzroot 2>/dev/null | awk 'NR>3{print "    "$NF" ("$5"B)"}'
+  echo "  [$name] surviving files (recursive):"
+  find /tmp/lzroot -type f -printf '    %P  [%s bytes]\n' 2>/dev/null | sort
 }
 
 echo "=== CASE A: rename with NO fsync, no later fsync (dirent durability of rename) ==="
