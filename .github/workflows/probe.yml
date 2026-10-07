@@ -19,3 +19,5 @@ jobs:
         run: bash probe3.sh
       - name: dm-flakey directory-entry fault injector probe
         run: bash probe4.sh
+      - name: LazyFS negative-control experiment (fixed vs unfixed)
+        run: bash probe5.sh
