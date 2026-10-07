@@ -9,8 +9,9 @@ echo "=== 3. deps ==="
 sudo apt-get update -qq >/dev/null 2>&1
 sudo apt-get install -y -qq fuse3 libfuse3-dev pkg-config cmake g++ >/dev/null 2>&1
 echo "apt rc=$?"
-grep -q user_allow_other /etc/fuse.conf || echo 'user_allow_other' | sudo tee -a /etc/fuse.conf >/dev/null
-grep user_allow_other /etc/fuse.conf
+sudo sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf
+grep -qx user_allow_other /etc/fuse.conf || echo 'user_allow_other' | sudo tee -a /etc/fuse.conf >/dev/null
+echo "/etc/fuse.conf: $(grep -c '^user_allow_other' /etc/fuse.conf) active user_allow_other line(s)"
 echo "=== 4. build LazyFS 0.3.1 ==="
 cd /tmp && rm -rf lazyfs
 git clone --depth 1 --branch 0.3.1 https://github.com/dsrhaslab/lazyfs.git >/dev/null 2>&1; echo "clone rc=$?"
